@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-COMPUTE_ENVIRONMENT="awsec2"
+COMPUTE_ENVIRONMENT="macstudio"
 
 log_and_shutdown() {
     local message="$1"
@@ -17,14 +17,14 @@ log_and_shutdown() {
 
 # read the environment variables at ./variables.*.env relative to the location of this script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-source "$SCRIPT_DIR"/variables.awsec2.env
+source "$SCRIPT_DIR"/variables.macstudio.env
 
 # sleep to give users time to log on and cancel the job if this is not a normally scheduled run
 sleep "$SLEEP_LENGTH"
 
 # try to activate conda then the environment
 source "$CONDA_ACTIVATE_PATH"
-if ! conda activate env; then
+if ! conda activate $CONDA_ENV_NAME; then
     log_and_shutdown "Failed to activate conda environment."
 fi
 
