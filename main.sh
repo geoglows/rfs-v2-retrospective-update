@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+COMPUTE_ENVIRONMENT="awsec2"
+
 log_and_shutdown() {
     local message="$1"
     curl -X POST -H "Content-Type: application/json" -d "{\"text\": \"$message\"}" "$WEBHOOK_ERROR_URL" || true
     sleep 60  # allow time to interrupt in case of retry, accidents, etc
-    sudo shutdown -h now
+    # shutdown if compute environment is awsec2 only
+    if [ "$COMPUTE_ENVIRONMENT" == "awsec2" ]; then
+        sudo shutdown -h now
+    else
+        exit 1
+    fi
 }
 
-# read the environment variables at ./variables.env relative to the location of this script
+# read the environment variables at ./variables.*.env relative to the location of this script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-source "$SCRIPT_DIR"/variables.env
+source "$SCRIPT_DIR"/variables.awsec2.env
 
 # sleep to give users time to log on and cancel the job if this is not a normally scheduled run
 sleep "$SLEEP_LENGTH"
