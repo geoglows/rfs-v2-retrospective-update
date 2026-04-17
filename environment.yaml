@@ -1,4 +1,4 @@
-name: env
+name: retroupdate
 channels:
   - conda-forge
 dependencies:

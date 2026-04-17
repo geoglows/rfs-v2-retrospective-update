@@ -4,6 +4,7 @@ from datetime import datetime
 from glob import glob
 from multiprocessing import Pool
 
+import netCDF4 as nc
 import numpy as np
 import pandas as pd
 import river_route as rr
@@ -16,6 +17,30 @@ from cloud_logger import CloudLog
 from set_env_variables import (
     FINAL_STATES_DIR, CONFIGS_DIR, DISCHARGE_DIR, FORECAST_INITS_DIR, ERA5_DIR, HOURLY_ZARR
 )
+
+
+def _write_outflows_fixed(df: pd.DataFrame, outflow_file: str, runoff_file: str) -> None:
+    # Workaround for river_route 1.3.0 + numpy 2.x: the library writes
+    # `df.index.values - df.index.values[0]` directly into a netCDF variable,
+    # which yields a timedelta64 array that netCDF4 rejects with
+    # "cannot include dtype 'm' in a buffer". Cast to int seconds first.
+    with nc.Dataset(outflow_file, mode='w', format='NETCDF4') as ds:
+        ds.createDimension('time', size=df.shape[0])
+        ds.createDimension('river_id', size=df.shape[1])
+
+        time_var = ds.createVariable('time', 'f8', ('time',))
+        time_var.units = f'seconds since {df.index[0].strftime("%Y-%m-%d %H:%M:%S")}'
+        time_var[:] = (df.index.values - df.index.values[0]).astype('timedelta64[s]').astype(np.int64)
+
+        id_var = ds.createVariable('river_id', 'i4', ('river_id',))
+        id_var[:] = df.columns.values
+
+        flow_var = ds.createVariable('Q', 'f4', ('time', 'river_id'))
+        flow_var[:] = df.values
+        flow_var.long_name = 'Discharge at catchment outlet'
+        flow_var.standard_name = 'discharge'
+        flow_var.aggregation_method = 'mean'
+        flow_var.units = 'm3 s-1'
 
 
 def route_vpu(args):
@@ -62,6 +87,7 @@ def route_vpu(args):
             progress_bar=False,
             log=False,
         )
+        .set_write_outflows(_write_outflows_fixed)
         .route()
     )
 
@@ -92,7 +118,7 @@ def make_rapid_style_inits(args) -> None:
     lon = np.zeros_like(rivid, dtype=np.float64)
 
     expected_qinit_file = os.path.join(FINAL_STATES_DIR, os.path.basename(vpu), f'finalstate_{final_timestamp}.parquet')
-    qinit = pd.read_parquet(expected_qinit_file)["Q"].values
+    qinit = np.asarray(pd.read_parquet(expected_qinit_file)["Q"].values).copy()
     qinit[qinit < 0] = 0
 
     # Time info

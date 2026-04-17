@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-COMPUTE_ENVIRONMENT="macstudio"
+# sample cron command. Should be UTC
+# 5 0 * * * /usr/bin/lockf -t 0 /Users/Shared/lockfiles/retrospective-update.lock /Users/Shared/code/rfs-v2-retrospective-update/main.sh
 
 log_and_shutdown() {
     local message="$1"
     curl -X POST -H "Content-Type: application/json" -d "{\"text\": \"$message\"}" "$WEBHOOK_ERROR_URL" || true
-    sleep 60  # allow time to interrupt in case of retry, accidents, etc
-    # shutdown if compute environment is awsec2 only
-    if [ "$COMPUTE_ENVIRONMENT" == "awsec2" ]; then
-        sudo shutdown -h now
-    else
-        exit 1
-    fi
+    exit 1
 }
+
+FORCE_SYNC_FIRST=0
+for arg in "$@"; do
+    case "$arg" in
+        --force-sync-first) FORCE_SYNC_FIRST=1 ;;
+        *) echo "Unknown argument: $arg"; exit 1 ;;
+    esac
+done
 
 # read the environment variables at ./variables.*.env relative to the location of this script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 source "$SCRIPT_DIR"/variables.macstudio.env
-
-# sleep to give users time to log on and cancel the job if this is not a normally scheduled run
-sleep "$SLEEP_LENGTH"
+mkdir -p "$LOG_ROOT"
+LOG_FILE="$LOG_ROOT/update_$(date +'%Y%m%d').log"
+echo "Logging to $LOG_FILE"
+exec >> "$LOG_FILE" 2>&1
 
 # try to activate conda then the environment
 source "$CONDA_ACTIVATE_PATH"
@@ -37,25 +41,25 @@ for cmd in "${commands[@]}"; do
 done
 
 # check that the configs directory and all local copies of zarrs exist and are not empty
-if [ ! -d "$CONFIGS_DIR" ] || [ -z "$(ls -A "$CONFIGS_DIR")" ]; then
-    echo "Error: Configs directory is empty or does not exist."
-    s5cmd --no-sign-request sync "$S3_CONFIGS_DIR/*" "$CONFIGS_DIR"
+if [ "$FORCE_SYNC_FIRST" -eq 1 ] || [ ! -d "$CONFIGS_DIR" ] || [ -z "$(ls -A "$CONFIGS_DIR" 2>/dev/null)" ]; then
+    echo "Syncing configs directory from S3."
+    s5cmd --log error --stat --no-sign-request sync "$S3_CONFIGS_DIR/*" "$CONFIGS_DIR"
 fi
-if [ ! -d "$HOURLY_ZARR" ]; then
-    echo "Hourly zarr directory is empty or does not exist. Downloading a copy."
-    s5cmd --no-sign-request sync --exclude "*Q/0.*" "$S3_HOURLY_ZARR/*" "$HOURLY_ZARR"
+if [ "$FORCE_SYNC_FIRST" -eq 1 ] || [ ! -d "$HOURLY_ZARR" ]; then
+    echo "Syncing hourly zarr from S3."
+    s5cmd --log error --stat --no-sign-request sync --exclude "*Q/0.*" "$S3_HOURLY_ZARR/*" "$HOURLY_ZARR"
 fi
-if [ ! -d "$DAILY_ZARR" ]; then
-    echo "Daily zarr directory is empty or does not exist. Downloading a copy."
-    s5cmd --no-sign-request sync --exclude "*Q/0.*" "$S3_DAILY_ZARR/*" "$DAILY_ZARR"
+if [ "$FORCE_SYNC_FIRST" -eq 1 ] || [ ! -d "$DAILY_ZARR" ]; then
+    echo "Syncing daily zarr from S3."
+    s5cmd --log error --stat --no-sign-request sync --exclude "*Q/0.*" "$S3_DAILY_ZARR/*" "$DAILY_ZARR"
 fi
-if [ ! -d "$MONTHLY_TIMESERIES_ZARR" ]; then
-    echo "Monthly timeseries directory is empty or does not exist. Downloading a copy."
-    s5cmd --no-sign-request sync --exclude "*Q/0.*" "$S3_MONTHLY_TIMESERIES_ZARR/*" "$WORK_DIR"/monthly-timeseries.zarr
+if [ "$FORCE_SYNC_FIRST" -eq 1 ] || [ ! -d "$MONTHLY_TIMESERIES_ZARR" ]; then
+    echo "Syncing monthly timeseries zarr from S3."
+    s5cmd --log error --stat --no-sign-request sync --exclude "*Q/0.*" "$S3_MONTHLY_TIMESERIES_ZARR/*" "$WORK_DIR"/monthly-timeseries.zarr
 fi
-if [ ! -d "$MONTHLY_TIMESTEPS_ZARR" ]; then
-    echo "Monthly timesteps directory is empty or does not exist. Downloading a copy."
-    s5cmd --no-sign-request sync "$S3_MONTHLY_TIMESTEPS_ZARR/*" "$WORK_DIR"/monthly-timesteps.zarr
+if [ "$FORCE_SYNC_FIRST" -eq 1 ] || [ ! -d "$MONTHLY_TIMESTEPS_ZARR" ]; then
+    echo "Syncing monthly timesteps zarr from S3."
+    s5cmd --log error --stat --no-sign-request sync "$S3_MONTHLY_TIMESTEPS_ZARR/*" "$WORK_DIR"/monthly-timesteps.zarr
 fi
 
 # Prepare directories
