@@ -48,17 +48,15 @@ import numcodecs
 import numpy as np
 import zarr
 
-
 WORK_DIR = Path('/Users/Shared/workdirs/rfs-v2-retrospective-update')
-
 
 # The LAST time value to keep (inclusive). New array length = index-of-target + 1.
 # Monthly stores currently end at 2026-02, which is the correct target, so they're no-ops.
 TARGETS: dict[str, tuple[Path, str]] = {
-    'hourly':             (WORK_DIR / 'hourly.zarr',             '2026-04-11T23:00:00'),
-    'daily':              (WORK_DIR / 'daily.zarr',              '2026-04-11T00:00:00'),
+    'hourly': (WORK_DIR / 'hourly.zarr', '2026-04-11T23:00:00'),
+    'daily': (WORK_DIR / 'daily.zarr', '2026-04-11T00:00:00'),
     'monthly-timeseries': (WORK_DIR / 'monthly-timeseries.zarr', '2026-03-01T00:00:00'),
-    'monthly-timesteps':  (WORK_DIR / 'monthly-timesteps.zarr',  '2026-03-01T00:00:00'),
+    'monthly-timesteps': (WORK_DIR / 'monthly-timesteps.zarr', '2026-03-01T00:00:00'),
 }
 
 
@@ -67,8 +65,8 @@ def decode_time(raw_values: np.ndarray, units: str) -> np.ndarray:
     epoch = np.datetime64(epoch_str.strip())
     factor_ns = {
         'seconds': int(1e9),
-        'hours':   int(3600e9),
-        'days':    int(86400e9),
+        'hours': int(3600e9),
+        'days': int(86400e9),
     }[unit.strip()]
     return epoch + (raw_values * factor_ns).astype('timedelta64[ns]')
 
@@ -168,7 +166,7 @@ def rollback_one_zarr(name: str, store: Path, target_ts: str,
         print(f'  ERROR: new_len {new_len} > old_len {old_len}')
         return False
 
-    print(f'  rollback: new length={new_len}, last kept value={decoded[new_len-1]}')
+    print(f'  rollback: new length={new_len}, last kept value={decoded[new_len - 1]}')
     print(f'  dropping {old_len - new_len} time steps')
 
     arrays_with_time = []
@@ -231,7 +229,7 @@ def rollback_one_zarr(name: str, store: Path, target_ts: str,
                 for err in pool.imap_unordered(_delete_file, delete_paths, chunksize=128):
                     if err:
                         errors.append(err)
-            print(f'     deleted {len(delete_paths) - len(errors)} chunks in {time.time()-t0:.1f}s'
+            print(f'     deleted {len(delete_paths) - len(errors)} chunks in {time.time() - t0:.1f}s'
                   + (f' ({len(errors)} errors)' if errors else ''))
             for e in errors[:5]:
                 print(f'       ! {e}')
@@ -262,7 +260,7 @@ def rollback_one_zarr(name: str, store: Path, target_ts: str,
                         rate = n_done / el if el else 0
                         eta = (total - n_done) / rate if rate else 0
                         print(f'       rewrote {n_done}/{total}  rate={rate:.0f}/s  eta={eta:.0f}s')
-            print(f'     rewrote {total - len(errors)} chunks in {time.time()-t0:.1f}s'
+            print(f'     rewrote {total - len(errors)} chunks in {time.time() - t0:.1f}s'
                   + (f' ({len(errors)} errors)' if errors else ''))
             for e in errors[:5]:
                 print(f'       ! {e}')
@@ -275,7 +273,7 @@ def rollback_one_zarr(name: str, store: Path, target_ts: str,
         print(f'  consolidating metadata...')
         t0 = time.time()
         zarr.consolidate_metadata(root.store)
-        print(f'  consolidated in {time.time()-t0:.1f}s')
+        print(f'  consolidated in {time.time() - t0:.1f}s')
 
         # verification pass
         root2 = zarr.open(store, mode='r')
@@ -296,12 +294,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description='Parallel rollback of zarr stores to a target end time.',
     )
-    ap.add_argument('--workers', type=int, default=os.cpu_count() or 8,
+    ap.add_argument('--workers', type=int, default=os.cpu_count(),
                     help='number of worker processes (default: cpu_count)')
     ap.add_argument('--only', nargs='*', default=None, choices=list(TARGETS.keys()),
                     help='subset of zarr stores to process')
     ap.add_argument('--execute', action='store_true',
-                    help='actually mutate stores (default: dry run)', default=False)
+                    help='actually mutate stores (default: dry run)', default=True)
     args = ap.parse_args()
 
     if not args.execute:
@@ -316,7 +314,7 @@ def main() -> int:
         ok = rollback_one_zarr(name, path, target, args.workers, args.execute)
         overall_ok = overall_ok and ok
 
-    print(f'\n{"="*60}')
+    print(f'\n{"=" * 60}')
     print(f'total elapsed: {time.time() - overall_t0:.1f}s')
     print(f'status: {"OK" if overall_ok else "FAILED"}')
 

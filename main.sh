@@ -38,6 +38,7 @@ done
 # read the environment variables at ./variables.*.env relative to script location
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 source "$SCRIPT_DIR"/variables.macstudio.env
+export PYTHONPATH="$SCRIPTS_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 # Prepare logging
 mkdir -p "$LOG_ROOT"
 LOG_FILE="$LOG_ROOT/update_$(date +'%Y%m%d').log"
@@ -104,19 +105,19 @@ chmod -R 777 "$DISCHARGE_DIR" "$ERA5_DIR" "$FINAL_STATES_DIR" "$FORECAST_INITS_D
 step_end "prepare transient directories"
 
 step_start "preflight validation"
-if ! python "$SCRIPTS_ROOT"/preflight_validation.py --local-is-truth "$LOCAL_IS_TRUTH"; then
+if ! python -m preflight_validation --local-is-truth "$LOCAL_IS_TRUTH"; then
     log_termination_message "Failed to validate the environment. Shutting down."
 fi
 step_end "preflight validation"
 
 step_start "download ERA5"
-if ! python "$SCRIPTS_ROOT"/download_era5.py; then
+if ! python -m download_era5; then
     log_termination_message "Failed to download ERA5 data. Shutting down."
 fi
 step_end "download ERA5"
 
 step_start "routing"
-if ! python "$SCRIPTS_ROOT"/route.py; then
+if ! python -m route; then
     log_termination_message "Failed to route data. Shutting down."
 fi
 step_end "routing"
@@ -127,17 +128,13 @@ s5cmd --log error --credentials-file "$AWS_CREDENTIALS_FILE" cp "$FORECAST_INITS
 step_end "upload init states and forecast inits to S3"
 
 step_start "append discharge to zarrs"
-if ! python "$SCRIPTS_ROOT"/append_discharge.py; then
+if ! python -m append_discharge; then
     log_termination_message "Failed to append discharge to zarrs. Shutting down."
 fi
-python "$SCRIPTS_ROOT"/sentinels.py set-updated hourly daily
+python -m helpers.sentinels hourly daily
 step_end "append discharge to zarrs"
 
 step_start "upload hourly + daily zarrs to S3"
-# Pattern A: upload body first (excluding sentinel.json), then sentinel as the
-# commit. If the body upload fails partway, S3's sentinel still reflects the
-# previous synced state and the next run's preflight reports "local ahead"
-# rather than silently claiming success.
 s5cmd --log error --credentials-file "$AWS_CREDENTIALS_FILE" cp --exclude "sentinel.json" "$HOURLY_ZARR/*" "$S3_HOURLY_ZARR"/
 s5cmd --log error --credentials-file "$AWS_CREDENTIALS_FILE" cp --exclude "sentinel.json" "$DAILY_ZARR/*" "$S3_DAILY_ZARR"/
 s5cmd --log error --credentials-file "$AWS_CREDENTIALS_FILE" cp "$HOURLY_ZARR/sentinel.json" "$S3_HOURLY_ZARR/sentinel.json"
@@ -149,10 +146,10 @@ rm -r "$DISCHARGE_DIR" "$ERA5_DIR"
 step_end "cleanup transient discharge + ERA5 dirs"
 
 step_start "generate monthly products"
-if ! python "$SCRIPTS_ROOT"/monthly_products.py; then
+if ! python -m monthly_products; then
     log_termination_message "Failed to prepare monthly derived products. Shutting down."
 fi
-python "$SCRIPTS_ROOT"/sentinels.py set-updated monthly-timeseries monthly-timesteps
+python -m helpers.sentinels monthly-timeseries monthly-timesteps
 step_end "generate monthly products"
 
 step_start "upload monthly products and HydroSOS COGs to S3"
