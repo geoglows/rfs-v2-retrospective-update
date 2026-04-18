@@ -3,6 +3,11 @@ import os
 # Parameters
 MIN_LAG_TIME_DAYS = int(os.getenv('MIN_LAG_TIME_DAYS', 5))
 
+# Dask LocalCluster parameters (used by append_discharge.py)
+DASK_N_WORKERS = int(os.getenv('DASK_N_WORKERS', 8))
+DASK_THREADS_PER_WORKER = int(os.getenv('DASK_THREADS_PER_WORKER', 2))
+DASK_MEMORY_LIMIT = os.getenv('DASK_MEMORY_LIMIT', '4GB')
+
 DATA_DIR = os.getenv('WORK_DIR')
 ERA5_DIR = os.getenv('ERA5_DIR')
 CONFIGS_DIR = os.getenv('CONFIGS_DIR')

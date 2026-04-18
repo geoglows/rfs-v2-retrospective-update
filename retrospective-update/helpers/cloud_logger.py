@@ -6,15 +6,15 @@ import requests
 
 class CloudLog:
     """
-    Posts logging messages to a given webhook URL (e.g., Microsoft Teams)
+    Posts logging messages to a given webhook URL to a logging channel
     """
     start_time: str
     log_url: str
     summary_attributes: dict = {}
 
     def __init__(self) -> None:
-        self.log_url = os.getenv('WEBHOOK_LOG_URL', None)
-        self.error_url = os.getenv('WEBHOOK_ERROR_URL', self.log_url)
+        self.log_url = os.getenv('WEBHOOK_LOG_SILENT', None)
+        self.error_url = os.getenv('WEBHOOK_LOG_ALERTS', self.log_url)
 
     def set_summary_attribute(self, **kwargs):
         self.summary_attributes.update(**kwargs)
@@ -36,7 +36,7 @@ class CloudLog:
 
         try:
             response = requests.post(
-                self.log_url,
+                url,
                 headers={"Content-Type": "application/json"},
                 json=message,
                 timeout=10

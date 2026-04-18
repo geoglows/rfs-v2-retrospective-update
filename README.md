@@ -1,78 +1,116 @@
 # retrospective-update
-Workflow to download ECMWF runoff data, route it using [river-route](https://river-route.hales.app/en/latest/), and append and upload to the GEOGLOWS AWS bucket. 
 
-## Setup
-### Create your EC2 Role
-1. Go to the IAM service page and click on "Roles" in the navigation pane.
-2. Click the "Create role" button.
-3. Under "Trusted entity type" select "AWS Service". Under "Use case" select "EC2". Click "Next"
-4. Search and select "AmazonS3FullAccess", "AmazonEC2FullAccess" and "CloudWatchLogsFullAccess". Click "Next"
-5. Give your role a name. Click "Create role."
+Daily pipeline that downloads new ECMWF ERA5 runoff data, routes it through the GEOGLOWS v2 river network, and appends the resulting discharge to the public zarr archives on S3 (hourly, daily,
+monthly-timeseries, monthly-timesteps) plus the HydroSOS GeoTIFF products.
 
-### Create your Lambda Role
-1. Go to the IAM service page and click on "Roles" in the navigation pane.
-2. Click the "Create role" button.
-3. Under "Trusted entity type" select "AWS Service". Under "Use case" select "Lambda". Click "Next"
-4. Search and select "AmazonS3FullAccess" and "AmazonEC2FullAccess". Click "Next"
-5. Give your role a name. Click "Create role".
+The pipeline is designed to be idempotent and self-healing. It runs unattended from cron and is expected to either complete fully or abort with a clear error that a human investigates.
 
-### Setup CloudWatch
-1. Go to the AWS Cloudwatch service page and select "Log groups" in the navigation pane. Click "Create log group" in the top right corner.
-2. Edit your group settings as you desire and click "Create".
-3. With your new log group, click the "Create log stream" button. Give it a name. You will need to remember the group name and stream name when filling out the .profile file.
+## Pipeline steps
 
-### Launch the computation instance
-1. On the "Launch an instance" page, select a linux-based OS in "Application and OS Images (Amazon Machine Image)". 
-2. Under "Instance Type", select your desired instance type. A possible choice is m5.2xlarge, which has eight vCPUs and 32 GiB of total memory. More CPUs generally equate to quicker execution due to the scripts' highly parallelized nature. Additionally, this instance type has better network performance.
-3. Under "Key pair (login)", choose or create a key pair.
-4. Under "Network settings" choose or create a security group. Enable "Auto-assign public IP".
-5. Under "Configure Storage" choose an appropriate amount of storage to hold the OS and a few GBs of data.
-6. Under "Advanced Details" select the EC2 IAM instance profile created earlier. 
-7. Finally, click the "Launch instance" button.
+All orchestrated by `main.sh`. Each step is bracketed by `START:` / `END:` banners in the log so you can grep a run's timeline.
 
-### Setup the computation instance
-1. Use SSH to connect to your instance (it should automatically start after launching). The command should look something like `ssh -i PATH/TO/KEY-PAIR.PEM ubuntu@IP-ADDRESS`. The IP address can be viewed on the Instances page of the EC2 service.
-2. Run the following code in the EC2 instance's terminal:
-``` 
-cd $HOME
-sudo apt-get update
-sudo apt-get install git
-git clone https://github.com/geoglows/retrospective-update.git
-sudo chmod +x retrospective-update/install.sh
-source retrospective-update/install.sh
+1. **Environment setup** — source the per-machine env file (`variables.macstudio.env` or `variables.awsec2.env`), raise `ulimit -n`, activate conda, verify tools are on `PATH`.
+2. **Download S3 copies** — `s5cmd sync` the static routing-configs directory every run (cheap, small file count). For each of the four zarr stores (hourly, daily, monthly-timeseries, monthly-timesteps) check whether the local `sentinel.json` is present; if not, `rm -rf` the local directory and `s5cmd cp` from S3. Hourly / daily / monthly-timeseries skip the massive historical chunk `Q/0.*` since it never changes and is huge (S3 remains authoritative for those chunks).
+3. **Prepare transient directories** — clean the per-run working dirs (`discharge/`, `era5/`, `final-states/`, `forecast-inits/`, `hydrosos/`).
+4. **Preflight validation** (`preflight_validation.py`) — aggregates three classes of check across all four zarrs and only exits non-zero if anything fails:
+    - internal consistency (`.zarray` vs `.zmetadata`, time-dim sizes match time coord)
+    - time coord integrity (no NaT, no duplicates, uniform spacing for hourly/daily, 28-31 day gaps for monthly)
+    - local-vs-S3 sentinel comparison (see below)
+5. **Download ERA5** (`download_era5.py`) — fetch all new daily hours from CDS, respecting `MIN_LAG_TIME_DAYS`.
+6. **Routing** (`route.py`) — per-VPU Muskingum routing using `river-route`, parallelized across VPUs with a process pool.
+7. **Upload init states and forecast inits** — push the fresh final-state and Qinit files to S3 first so downstream forecast systems can start as soon as possible.
+8. **Append discharge** (`append_discharge.py`) — for each daily ERA5 output, concatenate across VPUs, load in memory, then append to `hourly.zarr` via xarray region writes on a dask `LocalCluster`.
+   Daily is computed by resample+mean of the hourly data. Handles the edge cases we've hit: stale `.zmetadata`, unaligned dask vs zarr chunks along time, and xarray's region writes silently ignoring
+   dim coords. After success, bumps each store's local sentinel.
+9. **Upload hourly + daily zarrs** — Pattern A (see sentinels section). Body first with `--exclude "sentinel.json"`, then sentinel as the commit.
+10. **Generate monthly products** (`monthly_products.py`) — compute monthly averages and HydroSOS classification COGs.
+11. **Upload monthly products and HydroSOS COGs** — Pattern A upload for the two monthly zarrs; plain sync for the HydroSOS GeoTIFFs.
+12. **Terminate** — post a completion message to the alerts webhook. On EC2 (`SHUTDOWN_AFTER_RUN=1`) the machine halts so the instance stops billing. On the Mac Studio (`SHUTDOWN_AFTER_RUN=0`) the
+    process just exits.
+
+`main.sh` accepts two flags:
+
+- `--redownload-s3` — delete all local zarr directories before starting, forcing a clean download from S3.
+- `--local-is-truth <0|1>` — passed through to preflight. When `1`, skips all S3 comparisons and trusts local as long as the internal validations pass. Useful for running while getting behind on
+  intentional divergence cases.
+
+## Sentinels
+
+Each of the four zarr stores carries a `sentinel.json` file living at its root. (The routing-configs directory does *not* have a sentinel — it's static reference data, resynced unconditionally every run.)
+
+```json
+{
+  "updated": "2026-04-18T14:22:33Z"
+}
 ```
-3. Create a 1000GB volume (read how to do that [here](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-creating-volume.html)). Setup the instance to automatically attatch that volume on each startup (instructions under "Automatically mount an attached volume after reboot" [here](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html)). Remember the mount location you choose (we recommend simply using "/mnt"). Attach the volume.
-4. Fill out the .profile file found in the retrospective-update folder
-5. Stop the instance.
 
-### Add user data
-1. With the instance stopped, do the following:
-    - Select the instance, click "Actions",  go to "Instance settings", and select "Edit user data".
-    - Upload or copy-and-paste the coresponding *_user_data.txt from this repo to the Edit user data page. 
-    - Save
+The sentinel is a cheap, authoritative statement about "when this store was last written locally". It travels **inside** the store, so a single `s5cmd cp` round-trip moves both the data and its marker
+together. Zarr itself ignores the file (it's not named `.zarray`, `.zgroup`, `.zattrs`, `.zmetadata`, or a chunk), so xarray / dask / zarr.consolidate_metadata never see it.
 
-    Everytime the instance starts up, the user data script will be run. If you need to access the instance, comment out the last two lines of code of the user data scripts that run Python and shut down the instance. 
+`sentinels.py` holds the schema + helpers. Every successful local write (`append_discharge`, `monthly_products`) calls `sentinels.set_updated <names>` which rewrites the file with the current UTC ISO
+timestamp.
 
-### Create a lambda function
-1. Go to the AWS Lambda service page. Click the "Create function" button.
-2. Give your function a name. Select "Python 3.12" for the "Runtime" option. Under "Change default execution role"  select "Use an existing role" and choose the Lambda role you created previously. Click "Create function".
-3. Replace the code provided with the following, inserting the appropriate values for region and instance IDs:
+Preflight's comparison is trivial — no timestamp tolerances, no clock-skew windows. Because Pattern A uploads the file verbatim, a successful sync means S3's sentinel is a byte-for-byte copy of local'
+s:
+
+| local vs S3                          | interpretation                                                  | action                                 |
+|--------------------------------------|-----------------------------------------------------------------|----------------------------------------|
+| `local == s3`                        | fully synced                                                    | PASS                                   |
+| `local.updated > s3.updated`         | local has new work, upload is pending or was interrupted        | WARN; pipeline will re-upload          |
+| `local.updated < s3.updated`         | S3 moved forward without us knowing (admin push, other machine) | ERROR + alert; human decides           |
+| same `updated` but different content | race or corruption                                              | ERROR + alert                          |
+| S3 sentinel missing                  | first-run bootstrap                                             | WARN, proceed; pipeline will create it |
+
+### Pattern A upload
+
+`sentinel.json` is uploaded **last**, after the zarr body is on S3. This makes the sentinel upload the atomic "commit":
+
+```bash
+s5cmd cp --exclude "sentinel.json" "$HOURLY_ZARR/*" "$S3_HOURLY_ZARR/"    # body
+s5cmd cp "$HOURLY_ZARR/sentinel.json" "$S3_HOURLY_ZARR/sentinel.json"    # commit
 ```
-import json
-import boto3
 
-region = "INSERT_YOUR_REGION"
+If the body upload dies halfway (network drop, thread exhaustion), S3's sentinel still reflects the previous synced revision and the next preflight detects "local is ahead" — the pipeline
+transparently resumes by re-uploading. If the sentinel upload specifically fails, same outcome. We never end up with a "looks synced but actually missing chunks" state.
 
-def lambda_handler(event, context):
-    ec2 = boto3.client('ec2', region_name=region)
-    ec2.start_instances(InstanceIds=["INSERT_EC2_INSTANCE_ID_HERE"])
+### Bootstrapping
+
+The first time the pipeline is deployed against a set of S3 zarrs that predate the sentinel scheme, run `bootstrap_sentinels.py` once. It declares local as revision 1 and pushes a matching sentinel to
+each S3 store.
+
+```sh
+source variables.macstudio.env
+python bootstrap_sentinels.py
 ```
-   Make sure you click the "Deploy" button. Note that the region should not include letters after the number (i.e., us-west-2 instead of us-west-2a).
-   4. In the configuration tab, set the timeout to be 0 min, 10 sec.
 
-## Execution
-You may test your lambda function to ensure that every step of this process succeeds. When you have fixed any potential errors and are ready to schedule this process, do the following:
+After that, every subsequent `main.sh` run carries sentinels forward automatically.
 
-1. Go to the Lamda function you created in the previous step. Click the "Add trigger" button.
-2. Select "Eventbridge" from the dropdown. Select "Create a new rule". Select "Schedule expression". Enter a cron expression (for example, to set the lambda function to go off at 12:00 AM every Sunday, enter `cron(0 0 ? * SUN *)`).
-3. Hit "Add"  and you're done!
+## Layout
+
+```
+main.sh                         # orchestrator
+bootstrap_sentinels.py          # one-shot initializer
+rollback_zarrs.py               # recovery tool: roll zarrs back to a target timestamp in parallel
+variables.macstudio.env         # per-machine env file
+variables.awsec2.env            # per-machine env file
+retrospective-update/
+    preflight_validation.py     # step 4
+    download_era5.py            # step 5
+    route.py                    # step 6
+    append_discharge.py         # step 8
+    monthly_products.py         # step 10
+    validators.py               # shared internal-consistency + time-coord checks
+    sentinels.py                # sentinel schema + CLI
+    cloud_logger.py             # webhook posting
+    set_env_vars.py             # Python-side env var imports
+```
+
+## Recovery
+
+When a pipeline run fails midway you have a few tools:
+
+- **Re-run `main.sh`**: If the failure was transient (network, thread exhaustion), the sentinel comparison in preflight correctly identifies "local ahead" and the pipeline skips the already-done work,
+  picking up at the failed step.
+- **`main.sh --local-is-truth 1`**: Use when you know local is correct but the preflight's S3 comparison is noisy (e.g., deliberate manual changes were made).
+- **`main.sh --redownload-s3`**: Nuclear option. Deletes all local zarrs and redownloads from S3. Use when local is corrupt or you want to discard everything since the last S3 upload.
+- **`rollback_zarrs.py`**: Surgical rollback of each zarr to a specific target time, with parallel chunk cleanup. Use after partial appends have left zarr arrays in an inconsistent size/shape state.

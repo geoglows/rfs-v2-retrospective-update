@@ -13,8 +13,8 @@ from natsort import natsorted
 from netCDF4 import Dataset, date2num
 from tqdm import tqdm
 
-from cloud_logger import CloudLog
-from set_env_variables import (
+from helpers.cloud_logger import CloudLog
+from helpers.set_env_vars import (
     FINAL_STATES_DIR, CONFIGS_DIR, DISCHARGE_DIR, FORECAST_INITS_DIR, ERA5_DIR, HOURLY_ZARR
 )
 

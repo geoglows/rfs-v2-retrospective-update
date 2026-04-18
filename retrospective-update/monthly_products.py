@@ -10,8 +10,8 @@ import rasterio.transform
 import xarray as xr
 from natsort import natsorted
 
-from cloud_logger import CloudLog
-from set_env_variables import (
+from helpers.cloud_logger import CloudLog
+from helpers.set_env_vars import (
     DAILY_ZARR, MONTHLY_TIMESERIES_ZARR, MONTHLY_TIMESTEPS_ZARR, HYDROSOS_DIR,
     HYDROSOS_ID_PAIRS, HYDROSOS_THRESHOLDS, HYDROSOS_BASINS
 )
