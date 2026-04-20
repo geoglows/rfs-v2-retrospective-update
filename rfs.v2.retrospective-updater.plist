@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- unique identifier for launchctl; must match the plist filename -->
+    <key>Label</key>
+    <string>rfs.v2.retrospective-updater</string>
+
+    <!-- drop privileges from launchd (root) to rchales so Falcon's
+         root-process scrutiny doesn't apply -->
+    <key>UserName</key>
+    <string>rchales</string>
+    <key>GroupName</key>
+    <string>staff</string>
+
+    <!-- the command: lockf guards against concurrent runs, main.sh is the pipeline -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/lockf</string>
+        <string>-t</string>
+        <string>0</string>
+        <string>/Users/Shared/lockfiles/retrospective-update.lock</string>
+        <string>/Users/Shared/code/rfs-v2-retrospective-update/main.sh</string>
+    </array>
+
+    <!-- 00:05 every day. NOTE: StartCalendarInterval uses the MACHINE's
+         local time, not UTC. Verify the Mac Studio is on UTC (if it isn't,
+         either re-set the TZ or adjust Hour/Minute here). -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>0</integer>
+        <key>Minute</key>
+        <integer>5</integer>
+    </dict>
+
+    <!-- tell launchd this is foreground-class work; no background throttling,
+         no efficiency-core clamp, no IO throttling -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LowPriorityIO</key>
+    <false/>
+    <key>LowPriorityBackgroundIO</key>
+    <false/>
+    <key>Nice</key>
+    <integer>0</integer>
+
+    <!-- don't fire immediately when the plist is loaded; wait for the schedule -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- launchd captures stdout/stderr BEFORE main.sh redirects its own log.
+         This file only holds a small amount of preamble (path / env setup)
+         plus any crash output that happens before exec >> $LOG_FILE runs. -->
+    <key>StandardOutPath</key>
+    <string>/Users/Shared/logs/retrospective-update/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Shared/logs/retrospective-update/launchd.err.log</string>
+</dict>
+</plist>

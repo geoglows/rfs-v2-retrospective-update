@@ -15,28 +15,7 @@ The ordering (resize → delete orphans → rewrite boundary → consolidate) ke
 the store readable at every step: after step 1 the shape already hides any
 stale bytes past the new boundary, and if the script is interrupted mid-run
 the worst case is leftover orphan files on disk, never invalid data.
-
-Chunks that belong to time-chunk 0 are never touched (they contain only the
-long historical record). For hourly / daily / monthly-timeseries those live
-only on S3 (synced with `--exclude "*Q/0.*"`), so they can't be touched even
-if we wanted to.
-
-After a successful run:
-  - `cp -al` a backup or snapshot before re-running is cheap insurance
-  - upload the local stores back to S3 with `s5cmd cp "<dir>/*" "s3://…/"`
-    (cp, not sync — we do NOT want to --delete the Q/0.* historical chunks
-    on S3 that aren't local)
-
-Usage:
-    python rollback_zarrs.py                              # dry run (default)
-    python rollback_zarrs.py --only hourly                # one store, dry run
-    python rollback_zarrs.py --execute                    # mutate, all stores
-    python rollback_zarrs.py --execute --workers 20       # tune parallelism
 """
-
-from __future__ import annotations
-
-import argparse
 import os
 import sys
 import time
@@ -47,14 +26,15 @@ from pathlib import Path
 import numcodecs
 import numpy as np
 import zarr
+from tqdm import tqdm
 
 WORK_DIR = Path('/Users/Shared/workdirs/rfs-v2-retrospective-update')
 
 # The LAST time value to keep (inclusive). New array length = index-of-target + 1.
 # Monthly stores currently end at 2026-02, which is the correct target, so they're no-ops.
 TARGETS: dict[str, tuple[Path, str]] = {
-    'hourly': (WORK_DIR / 'hourly.zarr', '2026-04-11T23:00:00'),
-    'daily': (WORK_DIR / 'daily.zarr', '2026-04-11T00:00:00'),
+    'hourly': (WORK_DIR / 'hourly.zarr', '2026-04-12T23:00:00'),
+    'daily': (WORK_DIR / 'daily.zarr', '2026-04-12T00:00:00'),
     'monthly-timeseries': (WORK_DIR / 'monthly-timeseries.zarr', '2026-03-01T00:00:00'),
     'monthly-timesteps': (WORK_DIR / 'monthly-timesteps.zarr', '2026-03-01T00:00:00'),
 }
@@ -138,14 +118,13 @@ def _iter_chunk_paths(store: Path, arr_name: str, shape, chunks, old_t_chunks: i
                 yield t_idx, other, p
 
 
-def rollback_one_zarr(name: str, store: Path, target_ts: str,
-                      workers: int, execute: bool) -> bool:
+def rollback_one_zarr(name: str, store: Path, target_ts: str, workers: int, ) -> bool:
     print(f'\n=== {name} ===  store={store}')
     if not store.exists():
         print(f'  SKIP: store does not exist')
         return True
 
-    root = zarr.open(store, mode='r+' if execute else 'r')
+    root = zarr.open(store, mode='r+')
 
     time_arr = root['time'][:]
     units = dict(root['time'].attrs).get('units', 'seconds since 1970-01-01')
@@ -215,9 +194,6 @@ def rollback_one_zarr(name: str, store: Path, target_ts: str,
         total_rewrite += len(rewrite_paths)
         total_delete += len(delete_paths)
 
-        if not execute:
-            continue
-
         new_shape = (new_len,) + shape[1:]
         a.resize(new_shape)
         print(f'     resized {arr_name} -> {new_shape}')
@@ -226,7 +202,13 @@ def rollback_one_zarr(name: str, store: Path, target_ts: str,
             t0 = time.time()
             errors = []
             with Pool(workers) as pool:
-                for err in pool.imap_unordered(_delete_file, delete_paths, chunksize=128):
+                for err in tqdm(
+                    pool.imap_unordered(_delete_file, delete_paths, chunksize=128),
+                    total=len(delete_paths),
+                    desc=f'     {arr_name}: deleting orphan chunks',
+                    unit='chunk',
+                    smoothing=0.1,
+                ):
                     if err:
                         errors.append(err)
             print(f'     deleted {len(delete_paths) - len(errors)} chunks in {time.time() - t0:.1f}s'
@@ -248,88 +230,55 @@ def rollback_one_zarr(name: str, store: Path, target_ts: str,
                 'boundary_local_row': int(boundary_local_row),
             }
             errors = []
-            n_done = 0
-            total = len(rewrite_paths)
             with Pool(workers, initializer=_init_worker, initargs=(ctx,)) as pool:
-                for err in pool.imap_unordered(_rewrite_boundary_chunk, rewrite_paths, chunksize=32):
-                    n_done += 1
+                for err in tqdm(
+                    pool.imap_unordered(_rewrite_boundary_chunk, rewrite_paths, chunksize=32),
+                    total=len(rewrite_paths),
+                    desc=f'     {arr_name}: rewriting boundary chunks',
+                    unit='chunk',
+                    smoothing=0.1,
+                ):
                     if err:
                         errors.append(err)
-                    if n_done % 5000 == 0 or n_done == total:
-                        el = time.time() - t0
-                        rate = n_done / el if el else 0
-                        eta = (total - n_done) / rate if rate else 0
-                        print(f'       rewrote {n_done}/{total}  rate={rate:.0f}/s  eta={eta:.0f}s')
-            print(f'     rewrote {total - len(errors)} chunks in {time.time() - t0:.1f}s'
+            print(f'     rewrote {len(rewrite_paths) - len(errors)} chunks in {time.time() - t0:.1f}s'
                   + (f' ({len(errors)} errors)' if errors else ''))
             for e in errors[:5]:
                 print(f'       ! {e}')
             if errors:
                 return False
 
-    print(f'\n  summary for {name}: would delete {total_delete}, would rewrite {total_rewrite}')
+    print(f'  consolidating metadata...')
+    t0 = time.time()
+    zarr.consolidate_metadata(root.store)
+    print(f'  consolidated in {time.time() - t0:.1f}s')
 
-    if execute:
-        print(f'  consolidating metadata...')
-        t0 = time.time()
-        zarr.consolidate_metadata(root.store)
-        print(f'  consolidated in {time.time() - t0:.1f}s')
-
-        # verification pass
-        root2 = zarr.open(store, mode='r')
-        t2 = root2['time'][:]
-        dec2 = decode_time(t2, dict(root2['time'].attrs).get('units', units))
-        print(f'  VERIFY: new length={t2.shape[0]}, last time={dec2[-1]}')
-        for arr_name in arrays_with_time:
-            a2 = root2[arr_name]
-            if a2.shape[0] != new_len:
-                print(f'  *** VERIFY FAILED: {arr_name} shape[0]={a2.shape[0]} != {new_len}')
-                return False
-        print(f'  ok.')
+    # verification pass
+    root2 = zarr.open(store, mode='r')
+    t2 = root2['time'][:]
+    dec2 = decode_time(t2, dict(root2['time'].attrs).get('units', units))
+    print(f'  VERIFY: new length={t2.shape[0]}, last time={dec2[-1]}')
+    for arr_name in arrays_with_time:
+        a2 = root2[arr_name]
+        if a2.shape[0] != new_len:
+            print(f'  *** VERIFY FAILED: {arr_name} shape[0]={a2.shape[0]} != {new_len}')
+            return False
+    print(f'  ok.')
 
     return True
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description='Parallel rollback of zarr stores to a target end time.',
-    )
-    ap.add_argument('--workers', type=int, default=os.cpu_count(),
-                    help='number of worker processes (default: cpu_count)')
-    ap.add_argument('--only', nargs='*', default=None, choices=list(TARGETS.keys()),
-                    help='subset of zarr stores to process')
-    ap.add_argument('--execute', action='store_true',
-                    help='actually mutate stores (default: dry run)', default=True)
-    args = ap.parse_args()
-
-    if not args.execute:
-        print('*** DRY RUN — add --execute to actually modify zarrs ***')
-    print(f'workers: {args.workers}')
-
     overall_ok = True
     overall_t0 = time.time()
+    workers = os.cpu_count()
     for name, (path, target) in TARGETS.items():
-        if args.only and name not in args.only:
-            continue
-        ok = rollback_one_zarr(name, path, target, args.workers, args.execute)
+        ok = rollback_one_zarr(name, path, target, workers)
         overall_ok = overall_ok and ok
 
     print(f'\n{"=" * 60}')
     print(f'total elapsed: {time.time() - overall_t0:.1f}s')
     print(f'status: {"OK" if overall_ok else "FAILED"}')
-
-    if args.execute and overall_ok:
-        print('\nNext steps:')
-        print('  1. verify locally by opening each zarr (e.g., run explore_s3_copies.py)')
-        print('  2. upload the rolled-back stores to S3 with cp (NOT sync --delete,')
-        print('     because the historical Q/0.* chunks live only on S3):')
-        print('       s5cmd --credentials-file "$AWS_CREDENTIALS_FILE" cp \\')
-        print('         /Users/Shared/workdirs/rfs-v2-retrospective-update/hourly.zarr/\\* \\')
-        print('         s3://geoglows-v2/retrospective/hourly.zarr/')
-        print('     (repeat for daily.zarr; monthly-* were no-ops so no upload needed)')
-        print('  3. clear transient work dirs and re-run main.sh normally')
-
-    return 0 if overall_ok else 1
+    return not overall_ok  # because true is 1, but normal exit is 0
 
 
 if __name__ == '__main__':

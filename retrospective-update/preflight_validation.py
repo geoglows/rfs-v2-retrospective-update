@@ -32,7 +32,6 @@ import xarray as xr
 import zarr
 from natsort import natsorted
 
-import helpers.sentinels as sentinels
 from helpers.cloud_logger import CloudLog
 from helpers.set_env_vars import (
     DAILY_ZARR, FINAL_STATES_DIR, HOURLY_ZARR, S3_HOURLY_ZARR, S3_DAILY_ZARR,
@@ -42,33 +41,31 @@ from helpers.set_env_vars import (
 )
 from helpers.validators import validate_internal, validate_time
 
+SENTINEL_FILENAME = 'sentinel.json'
+
 STORES = [
     {
         'name': 'hourly',
         'local': HOURLY_ZARR,
         's3': S3_HOURLY_ZARR,
-        'sentinel': 'hourly',
         'freq': 'uniform',
     },
     {
         'name': 'daily',
         'local': DAILY_ZARR,
         's3': S3_DAILY_ZARR,
-        'sentinel': 'daily',
         'freq': 'uniform',
     },
     {
         'name': 'monthly-timeseries',
         'local': MONTHLY_TIMESERIES_ZARR,
         's3': S3_MONTHLY_TIMESERIES_ZARR,
-        'sentinel': 'monthly-timeseries',
         'freq': 'monthly',
     },
     {
         'name': 'monthly-timesteps',
         'local': MONTHLY_TIMESTEPS_ZARR,
         's3': S3_MONTHLY_TIMESTEPS_ZARR,
-        'sentinel': 'monthly-timesteps',
         'freq': 'monthly',
     },
 ]
@@ -97,7 +94,7 @@ def _fetch_s3_time_last(s3_path: str) -> float:
 
 def _fetch_s3_sentinel(s3_path: str) -> dict | None:
     """Fetch the sentinel.json from inside an S3 zarr store. None if absent."""
-    key = f'{s3_path.replace("s3://", "")}/{sentinels.SENTINEL_FILENAME}'
+    key = f'{s3_path.replace("s3://", "")}/{SENTINEL_FILENAME}'
     try:
         with _s3fs().open(key, 'rb') as f:
             return json.loads(f.read())
@@ -150,12 +147,53 @@ def _parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+def _parse_sentinel(data: dict, source: str) -> tuple[datetime | None, str | None]:
+    """Validate sentinel dict shape and return (updated_datetime, error).
+    Exactly one of the two is always non-None."""
+    if not isinstance(data, dict):
+        return None, f'{source}: sentinel is not a JSON object (got {type(data).__name__})'
+    if 'updated' not in data:
+        return None, f'{source}: sentinel is missing required "updated" key (got keys: {list(data.keys())})'
+    if not isinstance(data['updated'], str):
+        return None, f'{source}: "updated" must be a string, got {type(data["updated"]).__name__}'
+    extras = set(data.keys()) - {'updated'}
+    if extras:
+        return None, f'{source}: sentinel has unexpected keys: {sorted(extras)}'
+    try:
+        return _parse_iso(data['updated']), None
+    except Exception as e:
+        return None, f'{source}: cannot parse "updated" as ISO-8601: {e} (value={data["updated"]!r})'
+
+
+def _safe_read_local_sentinel(zarr_path: str, name: str) -> tuple[dict | None, Path, str | None]:
+    """Return (parsed_json, sentinel_path, error). parsed_json is None if
+    sentinel is missing OR unreadable; error is None iff read succeeded (or
+    file was absent)."""
+    path = Path(zarr_path) / SENTINEL_FILENAME
+    if not path.exists():
+        return None, path, None
+    try:
+        return json.loads(path.read_text()), path, None
+    except Exception as e:
+        return None, path, f'{name}: cannot parse local sentinel at {path}: {type(e).__name__}: {e}'
+
+
+def _safe_fetch_s3_sentinel(s3_path: str, name: str) -> tuple[dict | None, str | None]:
+    """Return (parsed_json, error). None json + None error means the S3 key
+    doesn't exist (bootstrap case)."""
+    try:
+        data = _fetch_s3_sentinel(s3_path)
+    except Exception as e:
+        return None, f'{name}: cannot fetch S3 sentinel from {s3_path}: {type(e).__name__}: {e}'
+    return data, None
+
+
 def check_sentinels() -> tuple[list[str], list[str], dict[str, bool]]:
     """Compare each store's local sentinel.json against its S3 counterpart.
 
-    The sentinel schema has a single field `updated` (ISO UTC timestamp).
+    The sentinel schema is a single-key dict `{"updated": "<ISO UTC>"}`.
     After a successful Pattern-A upload S3's sentinel is an exact copy of
-    local's, so nominal sync is just JSON equality; otherwise the `updated`
+    local's, so nominal sync is JSON equality; otherwise the `updated`
     ordering tells us which side is ahead.
 
     Returns (errors, warnings, local_ahead_flags).
@@ -166,27 +204,37 @@ def check_sentinels() -> tuple[list[str], list[str], dict[str, bool]]:
 
     for store in STORES:
         name = store['name']
-        local = sentinels.read(store['sentinel'])
-        s3 = _fetch_s3_sentinel(store['s3'])
 
+        # 1. Read both sides, catching IO/parse errors explicitly
+        local, local_path, local_read_err = _safe_read_local_sentinel(store['local'], name)
+        if local_read_err:
+            errors.append(local_read_err)
+            continue
         if local is None:
-            errors.append(f'{name}: local sentinel missing at {sentinels.path_for(store["sentinel"])}')
+            errors.append(f'{name}: local sentinel missing at {local_path}')
+            continue
+
+        s3, s3_read_err = _safe_fetch_s3_sentinel(store['s3'], name)
+        if s3_read_err:
+            errors.append(s3_read_err)
+            continue
+
+        # 2. Schema-validate both sides (shape + updated is parseable ISO)
+        lu, local_schema_err = _parse_sentinel(local, f'{name} [local]')
+        if local_schema_err:
+            errors.append(local_schema_err)
             continue
         if s3 is None:
-            # S3 has never had a sentinel written. Treat as first-run bootstrap
-            # and proceed — the pipeline will upload one at the end.
             warnings.append(f'{name}: S3 sentinel missing — treating as first-run bootstrap')
             continue
+        su, s3_schema_err = _parse_sentinel(s3, f'{name} [s3]')
+        if s3_schema_err:
+            errors.append(s3_schema_err)
+            continue
 
+        # 3. Compare contents
         if local == s3:
             continue  # nominal: fully synced
-
-        try:
-            lu = _parse_iso(local['updated'])
-            su = _parse_iso(s3['updated'])
-        except Exception as e:
-            errors.append(f'{name}: cannot parse sentinel updated field: {e} (local={local}, s3={s3})')
-            continue
 
         if lu > su:
             warnings.append(
@@ -229,12 +277,12 @@ def check_for_init_files() -> None:
     cmd = f's5cmd --no-sign-request cp "{S3_FINAL_STATES_DIR}/*/{expected_final_state_file}" {FINAL_STATES_DIR}/'
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
-        cl.error(f'Error running s5cmd copy to get init files: {result.stderr}')
+        cl.add_message(f'Error running s5cmd copy to get init files: {result.stderr}')
         raise RuntimeError
 
     states = natsorted(glob(os.path.join(FINAL_STATES_DIR, '*', 'finalstate*.parquet')))
     if len(states) != len(list(glob(os.path.join(CONFIGS_DIR, '*')))):
-        cl.error('s5cmd to fetch inits succeeded but expected files are not present')
+        cl.add_message('s5cmd to fetch inits succeeded but expected files are not present')
         raise RuntimeError
 
 
@@ -258,9 +306,9 @@ if __name__ == '__main__':
     cl = CloudLog()
     try:
         if args.local_is_truth:
-            cl.log('Pre-flight validation starting (--local-is-truth: skipping S3 comparisons)')
+            cl.add_message('Pre-flight validation starting (--local-is-truth: skipping S3 comparisons)')
         else:
-            cl.log('Pre-flight validation starting')
+            cl.add_message('Pre-flight validation starting')
 
         errors: list[str] = []
         warnings: list[str] = []
@@ -272,7 +320,7 @@ if __name__ == '__main__':
             warnings += sentinel_warnings
 
         for store in STORES:
-            cl.log(f'  validating {store["name"]}')
+            cl.add_message(f'  validating {store["name"]}')
             label = f'{store["name"]} [local]'
             errors += validate_internal(store['local'], label)
             errors += validate_time(store['local'], label, freq=store['freq'])
@@ -286,21 +334,25 @@ if __name__ == '__main__':
                     errors += s3_diff
 
         if warnings:
-            cl.log(f'Pre-flight validation warnings ({len(warnings)}):')
-            for w in warnings:
-                cl.log(f'  - {w}')
+            cl.add_message(
+                f'Pre-flight validation warnings ({len(warnings)}):\n'
+                + '\n'.join(f'  - {w}' for w in warnings)
+            )
 
         if errors:
-            cl.error(f'Pre-flight validation FAILED with {len(errors)} error(s):')
-            for e in errors:
-                cl.error(f'  - {e}')
+            cl.add_message(
+                f'Pre-flight validation FAILED with {len(errors)} error(s):\n'
+                + '\n'.join(f'  - {e}' for e in errors)
+            )
             exit(1)
 
-        cl.log('All stores pass validation.')
+        cl.add_message('All stores pass validation.')
         check_for_init_files()
-        cl.log('Init state files verified.')
+        cl.add_message('Init state files verified.')
         exit(0)
     except Exception as e:
-        cl.error(str(e))
-        cl.error(traceback.format_exc())
+        cl.add_message(str(e))
+        cl.add_message(traceback.format_exc())
         exit(1)
+    finally:
+        cl.flush()

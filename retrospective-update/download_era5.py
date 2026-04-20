@@ -33,12 +33,12 @@ def download_era5() -> None:
     final_date_to_simulate = today - pd.DateOffset(days=MIN_LAG_TIME_DAYS)
 
     if pd.to_datetime(last_date + np.timedelta64(MIN_LAG_TIME_DAYS, 'D')) > datetime.now():
-        cl.error(f'Last date {last_date} is within {MIN_LAG_TIME_DAYS} days of today less than expected minimum lag time. Stopping.')
+        cl.add_message(f'Last date {last_date} is within {MIN_LAG_TIME_DAYS} (minimum lag time). Stopping.')
         raise EnvironmentError
     date_range = pd.date_range(start=first_date_to_simulate, end=final_date_to_simulate, freq='D', )
 
     if not len(date_range):
-        cl.error(f'No dates to download between {first_date_to_simulate} and {final_date_to_simulate}')
+        cl.add_message(f'No dates to download between {first_date_to_simulate} and {final_date_to_simulate}')
         raise RuntimeError
 
     # make a list of unique year and month combinations in the list, in order. CDS API wants single month retrievals
@@ -57,12 +57,12 @@ def download_era5() -> None:
 
     downloaded_files = natsorted(glob.glob(os.path.join(ERA5_DIR, '*.nc')))
     if not downloaded_files:
-        cl.error("No ERA5 files were downloaded. Unexpected logic error determining dates to download")
+        cl.add_message("No ERA5 files were downloaded. Unexpected logic error determining dates to download")
         raise RuntimeError
 
     for downloaded_file in downloaded_files:
         with xr.load_dataset(downloaded_file, chunks={'time': 'auto', 'lat': 'auto', 'lon': 'auto'}, ) as ds:
-            # cdsapi does not validate that the range of dates you ask for is all available. we need to validate that we got everything we expected
+            # cdsapi does not validate dates, we need to validate that we got what we expected
             if ds['valid_time'].shape[0] == 0:
                 os.remove(downloaded_file)
                 continue
@@ -80,7 +80,7 @@ def download_era5() -> None:
 
     downloaded_files = list(natsorted(glob.glob(os.path.join(ERA5_DIR, '*.nc'))))
     if not downloaded_files:
-        cl.error("No usable runoff data obtained from ERA5 download")
+        cl.add_message("No usable runoff data obtained from ERA5 download")
         raise RuntimeError
 
     with xr.open_mfdataset(downloaded_files) as ds, xr.open_zarr(HOURLY_ZARR) as hourly_ds:
@@ -88,15 +88,29 @@ def download_era5() -> None:
         ro_time = ds['valid_time'].values
         retro_time = hourly_ds['time'].values
         total_time = np.concatenate((retro_time, ro_time))
-        difs = np.diff(total_time)
-        if not np.all(difs == difs[0]):
-            cl.error("Time dimension of ERA5 not consistent with routed discharge")
+        diffs = np.diff(total_time)
+        if not np.all(diffs == diffs[0]):
+            cl.add_message("Time dimension of ERA5 not consistent with routed discharge")
             raise RuntimeError
 
         # Check that there are no nans
         if np.isnan(ds['ro'].values).any():
-            cl.error("Invalid data found in nans")
+            cl.add_message("Invalid data found in nans")
             raise RuntimeError
+
+    # now check all era5 files in the directory, not only the barely downloaded ones.
+    # check for unique, non-overlapping, sequential time steps that are consistent with the existing zarr time steps.
+    all_era5_files = natsorted(glob.glob(os.path.join(ERA5_DIR, '*.nc')))
+    all_times = []
+    for era5_file in all_era5_files:
+        with xr.open_dataset(era5_file) as ds:
+            all_times.append(ds['valid_time'].values)
+    all_times = np.concatenate(all_times)
+    diffs = np.diff(all_times)
+    if not np.all(diffs == diffs[0]):
+        cl.add_message("Time dimension of ERA5 files not consistent across files")
+        cl.add_message(f"Found inconsistency between newly downloaded and already existing era5 files.")
+        raise RuntimeError
 
 
 def date_to_file_name(year: int, month: int, days: list[int]) -> str:
@@ -130,10 +144,12 @@ def retrieve_data(year: int, month: int, days: list[int], file: str, ) -> None:
 if __name__ == '__main__':
     cl = CloudLog()
     try:
-        cl.log('Preparing ERA5 data')
+        cl.add_message('Preparing ERA5 data')
         download_era5()
         exit(0)
     except Exception as e:
-        cl.error(str(e))
-        cl.error(traceback.format_exc())
+        cl.add_message(str(e))
+        cl.add_message(traceback.format_exc())
         exit(1)
+    finally:
+        cl.add_message('Finished preparing ERA5 data')

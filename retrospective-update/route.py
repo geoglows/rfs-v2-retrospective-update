@@ -200,12 +200,12 @@ if __name__ == '__main__':
         init_timestamp_era5 = pd.to_datetime(xr.open_dataset(era5_data[0]).valid_time[0].values) - pd.Timedelta(hours=1)
         init_timestamp_era5 = init_timestamp_era5.strftime('%Y%m%d%H%M')
         if init_timestamp != init_timestamp_era5:
-            cl.error('Last time step in the zarr timeseries is different than the first era5')
+            cl.add_message('Last time step in the zarr timeseries is different than the first era5')
             raise RuntimeError
         vpus = natsorted(glob(os.path.join(CONFIGS_DIR, '*')))
 
         with Pool(os.cpu_count()) as p:
-            cl.log('Routing')
+            cl.add_message('Routing')
             list(
                 tqdm(
                     p.imap_unordered(route_vpu, [(vpu, era5_data, init_timestamp, final_timestamp) for vpu in vpus]),
@@ -213,7 +213,7 @@ if __name__ == '__main__':
                 ),
             )
 
-            cl.log('Making Forecast Inits')
+            cl.add_message('Making Forecast Inits')
             list(
                 tqdm(
                     p.imap_unordered(make_rapid_style_inits, [(vpu, final_timestamp) for vpu in vpus]),
@@ -222,6 +222,8 @@ if __name__ == '__main__':
             )
         exit(0)
     except Exception as e:
-        cl.error(str(e))
-        cl.error(traceback.format_exc())
+        cl.add_message(str(e))
+        cl.add_message(traceback.format_exc())
         exit(1)
+    finally:
+        cl.flush()

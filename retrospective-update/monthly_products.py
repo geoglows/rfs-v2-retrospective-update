@@ -35,9 +35,9 @@ def update_monthly_products(cl: CloudLog) -> None:
     months_to_compute = set(months_available) - set(months_calculated)
     months_to_compute = natsorted(list(months_to_compute))
     if not months_to_compute:
-        cl.log("No months to compute, all monthly products are up to date.")
+        cl.add_message("No months to compute, all monthly products are up to date.")
         return
-    cl.log(f"Months to compute: {months_to_compute}")
+    cl.add_message(f"Months to compute: {months_to_compute}")
 
     # filter the dataset to only the months that need to be computed, average them, and append to the monthly zarrs
     daily_zarr = (
@@ -49,13 +49,13 @@ def update_monthly_products(cl: CloudLog) -> None:
     # remove all the chunks encoding
     daily_zarr.encoding.pop('chunks', None)
     daily_zarr.Q.encoding.pop('chunks', None)
-    cl.log('Appending to monthly timeseries')
+    cl.add_message('Appending to monthly timeseries')
     (
         daily_zarr
         .chunk({'time': 1020, 'river_id': 250})
         .to_zarr(MONTHLY_TIMESERIES_ZARR, mode='a', append_dim='time', consolidated=True, zarr_format=2)
     )
-    cl.log('Appending to monthly timesteps')
+    cl.add_message('Appending to monthly timesteps')
     (
         daily_zarr
         .chunk({'time': 1, 'river_id': 2_500_000})
@@ -63,7 +63,7 @@ def update_monthly_products(cl: CloudLog) -> None:
     )
 
     # for each month in months_to_compute, also make a hydrosos geotiff
-    cl.log('Preparing HydroSOS COGs')
+    cl.add_message('Preparing HydroSOS COGs')
     id_pairs = pd.read_parquet(HYDROSOS_ID_PAIRS)
     thresholds = pd.read_parquet(HYDROSOS_THRESHOLDS)
     basins = gpd.read_parquet(HYDROSOS_BASINS)
@@ -148,11 +148,13 @@ def update_monthly_products(cl: CloudLog) -> None:
 
 if __name__ == '__main__':
     cl = CloudLog()
-    cl.log('Updating monthly products')
+    cl.add_message('Updating monthly products')
     try:
         update_monthly_products(cl)
         exit(0)
     except Exception as e:
-        cl.error(str(e))
-        cl.error(traceback.format_exc())
+        cl.add_message(str(e))
+        cl.add_message(traceback.format_exc())
         exit(1)
+    finally:
+        cl.flush()

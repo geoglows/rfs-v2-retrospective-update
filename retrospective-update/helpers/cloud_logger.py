@@ -9,36 +9,35 @@ class CloudLog:
     Posts logging messages to a given webhook URL to a logging channel
     """
     start_time: str
-    log_url: str
-    summary_attributes: dict = {}
+    url: str
+    messages: list
 
     def __init__(self) -> None:
-        self.log_url = os.getenv('WEBHOOK_LOG_SILENT', None)
-        self.error_url = os.getenv('WEBHOOK_LOG_ALERTS', self.log_url)
+        self.url = os.getenv('WEBHOOK_LOG_SILENT', '')
 
-    def set_summary_attribute(self, **kwargs):
-        self.summary_attributes.update(**kwargs)
+    @staticmethod
+    def now() -> str:
+        return datetime.datetime.now().strftime("%Y%m%d %H:%M:%S")
 
-    def error(self, *args):
-        all_args = [datetime.datetime.now().strftime('%Y%m%d %H:%M:%S'), ] + list(args)
-        message_json = {'text': '\n'.join(all_args)}
-        self.ping(self.error_url, message_json)
+    def add_message(self, message: str) -> None:
+        self.messages.append(f'{self.now()} - {message}')
 
-    def log(self, *args):
-        all_args = [datetime.datetime.now().strftime('%Y%m%d %H:%M:%S'), ] + list(args)
-        message_json = {'text': '\n'.join(all_args)}
-        self.ping(self.log_url, message_json)
+    def clear_messages(self) -> None:
+        self.messages = []
 
-    def ping(self, url: str, message: dict) -> None:
-        print(message["text"])
-        if not url:
-            return
+    def flush(self):
+        # todo each script should set some metadata about the logging first. which task is posting the message?
+        # todo if era5 files are already existing before running the script, raise a warning. Should there be a flag
+        #  to clear era5 first?
+        message_json = {'text': '\n'.join(self.messages)}
+        self.clear_messages()
+        print(message_json["text"])  # print so it gets sent to the local log file also
 
         try:
             response = requests.post(
-                url,
+                self.url,
                 headers={"Content-Type": "application/json"},
-                json=message,
+                json=message_json,
                 timeout=10
             )
 
