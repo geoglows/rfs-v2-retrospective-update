@@ -3,6 +3,8 @@ import os
 # Parameters
 MIN_LAG_TIME_DAYS = int(os.getenv('MIN_LAG_TIME_DAYS', 5))
 
+WEBHOOK_LOG_SILENT = os.getenv('WEBHOOK_LOG_SILENT')
+
 # Dask LocalCluster parameters (used by append_discharge.py)
 DASK_N_WORKERS = int(os.getenv('DASK_N_WORKERS', 8))
 DASK_THREADS_PER_WORKER = int(os.getenv('DASK_THREADS_PER_WORKER', 2))

@@ -13,7 +13,8 @@ from natsort import natsorted
 from helpers.cloud_logger import CloudLog
 from helpers.set_env_vars import (
     DAILY_ZARR, MONTHLY_TIMESERIES_ZARR, MONTHLY_TIMESTEPS_ZARR, HYDROSOS_DIR,
-    HYDROSOS_ID_PAIRS, HYDROSOS_THRESHOLDS, HYDROSOS_BASINS
+    HYDROSOS_ID_PAIRS, HYDROSOS_THRESHOLDS, HYDROSOS_BASINS,
+    WEBHOOK_LOG_SILENT,
 )
 
 
@@ -147,8 +148,7 @@ def update_monthly_products(cl: CloudLog) -> None:
 
 
 if __name__ == '__main__':
-    cl = CloudLog()
-    cl.add_message('Updating monthly products')
+    cl = CloudLog(WEBHOOK_LOG_SILENT, step='monthly products')
     try:
         update_monthly_products(cl)
         exit(0)

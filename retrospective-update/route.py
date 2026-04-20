@@ -15,7 +15,8 @@ from tqdm import tqdm
 
 from helpers.cloud_logger import CloudLog
 from helpers.set_env_vars import (
-    FINAL_STATES_DIR, CONFIGS_DIR, DISCHARGE_DIR, FORECAST_INITS_DIR, ERA5_DIR, HOURLY_ZARR
+    FINAL_STATES_DIR, CONFIGS_DIR, DISCHARGE_DIR, FORECAST_INITS_DIR, ERA5_DIR, HOURLY_ZARR,
+    WEBHOOK_LOG_SILENT,
 )
 
 
@@ -190,7 +191,7 @@ def make_rapid_style_inits(args) -> None:
 
 
 if __name__ == '__main__':
-    cl = CloudLog()
+    cl = CloudLog(WEBHOOK_LOG_SILENT, step='routing')
     try:
         # determine the first and last time step that will come out of routing by reading the era5 files
         era5_data = natsorted(glob(os.path.join(ERA5_DIR, 'era5_*.nc')))

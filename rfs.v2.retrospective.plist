@@ -4,7 +4,7 @@
 <dict>
     <!-- unique identifier for launchctl; must match the plist filename -->
     <key>Label</key>
-    <string>rfs.v2.retrospective-updater</string>
+    <string>rfs.v2.retrospective</string>
 
     <!-- drop privileges from launchd (root) to rchales so Falcon's
          root-process scrutiny doesn't apply -->

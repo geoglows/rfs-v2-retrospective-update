@@ -82,7 +82,6 @@ fi
 step_end "environment setup"
 
 step_begin "download S3 copies"
-# sync the configs if we don't have 125 expected subdirecctories
 if [ "$(find "$CONFIGS_DIR" -maxdepth 1 -type d -name 'vpu=*' 2>/dev/null | wc -l)" -ne 125 ]; then
     echo "Syncing configs directory from S3."
     s5cmd --log error --no-sign-request sync "$S3_CONFIGS_DIR/*" "$CONFIGS_DIR"
@@ -112,7 +111,11 @@ chmod -R 777 "$DISCHARGE_DIR" "$ERA5_DIR" "$FINAL_STATES_DIR" "$FORECAST_INITS_D
 step_end "prepare working directories"
 
 step_begin "preflight validation"
-if ! python -m preflight_validation --local-is-truth "$LOCAL_IS_TRUTH"; then
+preflight_args=()
+if [ "$LOCAL_IS_TRUTH" -eq 1 ]; then
+    preflight_args+=(--local-is-truth)
+fi
+if ! python -m preflight_validation "${preflight_args[@]}"; then
     log_termination_message "Failed to validate the environment. Shutting down."
 fi
 step_end "preflight validation"

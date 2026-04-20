@@ -12,6 +12,7 @@ from helpers.cloud_logger import CloudLog
 from helpers.set_env_vars import (
     DAILY_ZARR, HOURLY_ZARR, DISCHARGE_DIR,
     DASK_N_WORKERS, DASK_THREADS_PER_WORKER, DASK_MEMORY_LIMIT,
+    WEBHOOK_LOG_SILENT,
 )
 from helpers.validators import validate_internal, validate_time
 
@@ -147,7 +148,7 @@ def _assert_stores_consistent(label: str) -> None:
 
 
 if __name__ == '__main__':
-    cl = CloudLog()
+    cl = CloudLog(WEBHOOK_LOG_SILENT, step='append discharge')
     cluster = LocalCluster(
         n_workers=DASK_N_WORKERS,
         threads_per_worker=DASK_THREADS_PER_WORKER,

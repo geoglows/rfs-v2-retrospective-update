@@ -38,6 +38,7 @@ from helpers.set_env_vars import (
     S3_FINAL_STATES_DIR, CONFIGS_DIR,
     MONTHLY_TIMESTEPS_ZARR, MONTHLY_TIMESERIES_ZARR,
     S3_MONTHLY_TIMESTEPS_ZARR, S3_MONTHLY_TIMESERIES_ZARR,
+    WEBHOOK_LOG_SILENT,
 )
 from helpers.validators import validate_internal, validate_time
 
@@ -180,7 +181,7 @@ def _safe_read_local_sentinel(zarr_path: str, name: str) -> tuple[dict | None, P
 
 def _safe_fetch_s3_sentinel(s3_path: str, name: str) -> tuple[dict | None, str | None]:
     """Return (parsed_json, error). None json + None error means the S3 key
-    doesn't exist (bootstrap case)."""
+    doesn't exist."""
     try:
         data = _fetch_s3_sentinel(s3_path)
     except Exception as e:
@@ -190,11 +191,6 @@ def _safe_fetch_s3_sentinel(s3_path: str, name: str) -> tuple[dict | None, str |
 
 def check_sentinels() -> tuple[list[str], list[str], dict[str, bool]]:
     """Compare each store's local sentinel.json against its S3 counterpart.
-
-    The sentinel schema is a single-key dict `{"updated": "<ISO UTC>"}`.
-    After a successful Pattern-A upload S3's sentinel is an exact copy of
-    local's, so nominal sync is JSON equality; otherwise the `updated`
-    ordering tells us which side is ahead.
 
     Returns (errors, warnings, local_ahead_flags).
     """
@@ -218,14 +214,14 @@ def check_sentinels() -> tuple[list[str], list[str], dict[str, bool]]:
         if s3_read_err:
             errors.append(s3_read_err)
             continue
+        if s3 is None:
+            errors.append(f'{name}: S3 sentinel missing')
+            continue
 
         # 2. Schema-validate both sides (shape + updated is parseable ISO)
         lu, local_schema_err = _parse_sentinel(local, f'{name} [local]')
         if local_schema_err:
             errors.append(local_schema_err)
-            continue
-        if s3 is None:
-            warnings.append(f'{name}: S3 sentinel missing — treating as first-run bootstrap')
             continue
         su, s3_schema_err = _parse_sentinel(s3, f'{name} [s3]')
         if s3_schema_err:
@@ -286,29 +282,20 @@ def check_for_init_files() -> None:
         raise RuntimeError
 
 
-def _bool01(s: str) -> bool:
-    if s in ('0', '1'):
-        return s == '1'
-    raise argparse.ArgumentTypeError(f'expected 0 or 1, got {s!r}')
-
-
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument(
         '--local-is-truth',
-        type=_bool01,
-        default=False,
-        help='when 1, skip S3 freshness and shape comparisons; trust the '
+        action='store_true',
+        help='skip local-vs-S3 sentinel and shape comparisons; trust the '
              'local copy as long as it passes internal validation',
     )
     args = ap.parse_args()
 
-    cl = CloudLog()
+    cl = CloudLog(WEBHOOK_LOG_SILENT, step='preflight validation')
     try:
         if args.local_is_truth:
-            cl.add_message('Pre-flight validation starting (--local-is-truth: skipping S3 comparisons)')
-        else:
-            cl.add_message('Pre-flight validation starting')
+            cl.add_message('--local-is-truth set: skipping local-vs-S3 comparisons')
 
         errors: list[str] = []
         warnings: list[str] = []

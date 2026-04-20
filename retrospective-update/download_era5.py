@@ -12,7 +12,8 @@ from natsort import natsorted
 
 from helpers.cloud_logger import CloudLog
 from helpers.set_env_vars import (
-    HOURLY_ZARR, ERA5_DIR, MIN_LAG_TIME_DAYS
+    HOURLY_ZARR, ERA5_DIR, MIN_LAG_TIME_DAYS,
+    WEBHOOK_LOG_SILENT,
 )
 
 
@@ -142,9 +143,8 @@ def retrieve_data(year: int, month: int, days: list[int], file: str, ) -> None:
 
 
 if __name__ == '__main__':
-    cl = CloudLog()
+    cl = CloudLog(WEBHOOK_LOG_SILENT, step='download ERA5')
     try:
-        cl.add_message('Preparing ERA5 data')
         download_era5()
         exit(0)
     except Exception as e:
@@ -152,4 +152,4 @@ if __name__ == '__main__':
         cl.add_message(traceback.format_exc())
         exit(1)
     finally:
-        cl.add_message('Finished preparing ERA5 data')
+        cl.flush()
