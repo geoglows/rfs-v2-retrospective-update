@@ -55,6 +55,7 @@ done
 # read the environment variables at ./variables.*.env relative to script location
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 source "$SCRIPT_DIR"/variables.macstudio.env
+source "$SCRIPT_DIR"/webhooks.env
 umask 002
 ulimit -n 65536  # raise the open-file limit
 export PYTHONPATH="$SCRIPTS_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -115,7 +116,7 @@ preflight_args=()
 if [ "$LOCAL_IS_TRUTH" -eq 1 ]; then
     preflight_args+=(--local-is-truth)
 fi
-if ! python -m preflight_validation "${preflight_args[@]}"; then
+if ! python -m preflight_validation ${preflight_args[@]+"${preflight_args[@]}"}; then
     log_termination_message "Failed to validate the environment. Shutting down."
 fi
 step_end "preflight validation"

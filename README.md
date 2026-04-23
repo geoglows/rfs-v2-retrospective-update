@@ -59,45 +59,37 @@ The following are the common possible invalid states, if they are recoverable, a
 
 ## Scheduling (launchd)
 
-The daily compute is schedules with cron or launchd (`rfs.v2.retrospective.plist`). Jobs invoke a lockfile first so multiple runs cannot start and try to modify the same zarr simultaneously.
+The daily compute is scheduled with launchd (`rfs.v2.retrospective.plist`). The invocation is wrapped in `/usr/bin/lockf` against
+`/Users/Shared/lockfiles/retrospective-update.lock` so overlapping runs are prevented.
 
-Job should launch at 00:05 UTC daily. Verify the machine's timezone or otherwise arrange for scheduler to use UTC.
+Job fires at 00:05 **machine-local** time daily — `StartCalendarInterval` is not UTC-aware, so verify the Mac's clock is on UTC (or adjust the Hour/Minute in the plist) before relying on "00:05 UTC".
 
-Install or reload:
+The plist declares:
 
-```sh
-cp rfs.v2.retrospective.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/rfs.v2.retrospective.plist
-# to reload after edits:
-launchctl bootout gui/$(id -u)/rfs.v2.retrospective
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/rfs.v2.retrospective.plist
-# run on demand:
-launchctl kickstart -k gui/$(id -u)/rfs.v2.retrospective
-```
-
-The `launchd` plist is given in `rfs.v2.retrospective.plist` in the repo. It declares:
-
-- `UserName = rchales`, `GroupName = staff` — launchd drops privileges before exec'ing `main.sh`
-- `ProcessType = Interactive` + `LowPriorityIO = false` — no QoS or I/O throttling
-- `StartCalendarInterval` — fires daily at **00:05 machine-local time** (verify the clock is UTC before relying on "00:05 UTC")
-- Wraps the invocation in `/usr/bin/lockf` against `/Users/Shared/lockfiles/retrospective-update.lock` so overlapping runs are prevented
+- `UserName = rchales`, `GroupName = staff` — launchd drops privileges before exec'ing `main.sh` (avoids Falcon's root-process scrutiny)
+- `ProcessType = Interactive` + `LowPriorityIO = false` + `Nice = 0` — no QoS, I/O, or efficiency-core throttling
+- `RunAtLoad = false` — does not fire on bootstrap, waits for the schedule
+- `StandardOutPath` / `StandardErrorPath` — launchd-captured preamble and any crash output that happens before `main.sh` redirects into its own log
 
 ### Install
 
-```sh
-sudo cp /Users/Shared/code/rfs-v2-retrospective-update/rfs.v2.retrospective.plist /Library/LaunchDaemons/rfs.v2.retrospective.plist
-sudo chown root:wheel /Library/LaunchDaemons/rfs.v2.retrospective.plist
-sudo chmod 644      /Library/LaunchDaemons/rfs.v2.retrospective.plist
-sudo launchctl load -w /Library/LaunchDaemons/rfs.v2.retrospective.plist
-```
+`com.apple.provenance` is a macOS xattr the kernel auto-applies to files written by sandboxed processes (editors, Finder). launchd rejects plists carrying it with
+`Bootstrap failed: 5: Input/output error`, and `xattr -c` doesn't stick — the kernel re-applies it. Writing the plist via `sudo tee` from Terminal avoids the tag entirely.
 
-`launchctl load -w` both loads the plist and persists its enabled-at-boot state so it survives reboots.
+```sh
+sudo tee /Library/LaunchDaemons/rfs.v2.retrospective.plist \
+  < /Users/Shared/code/rfs-v2-retrospective-update/rfs.v2.retrospective.plist > /dev/null
+sudo chown root:wheel /Library/LaunchDaemons/rfs.v2.retrospective.plist
+sudo chmod 644        /Library/LaunchDaemons/rfs.v2.retrospective.plist
+ls -l@ /Library/LaunchDaemons/rfs.v2.retrospective.plist   # confirm no '@' / no com.apple.provenance
+sudo launchctl bootstrap system /Library/LaunchDaemons/rfs.v2.retrospective.plist
+```
 
 Verify it's registered:
 
 ```sh
+# columns are: PID | last exit status | label
 sudo launchctl list | grep rfs.v2
-# PID column is '-' until the next 00:05 fire; that's normal
 ```
 
 ### Trigger a run immediately (don't wait for the schedule)
@@ -111,15 +103,24 @@ The `-k` kills any currently-running instance first and starts a fresh one.
 ### Reload after editing the plist
 
 ```sh
-sudo launchctl unload /Library/LaunchDaemons/rfs.v2.retrospective.plist
-sudo cp /Users/Shared/code/rfs-v2-retrospective-update/rfs.v2.retrospective.plist /Library/LaunchDaemons/rfs.v2.retrospective.plist
-sudo launchctl load -w /Library/LaunchDaemons/rfs.v2.retrospective.plist
+sudo launchctl bootout system/rfs.v2.retrospective
+sudo tee /Library/LaunchDaemons/rfs.v2.retrospective.plist \
+  < /Users/Shared/code/rfs-v2-retrospective-update/rfs.v2.retrospective.plist > /dev/null
+sudo chown root:wheel /Library/LaunchDaemons/rfs.v2.retrospective.plist
+sudo chmod 644        /Library/LaunchDaemons/rfs.v2.retrospective.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/rfs.v2.retrospective.plist
+```
+
+### Inspect state
+
+```sh
+sudo launchctl print system/rfs.v2.retrospective   # full state: schedule, last exit, paths
 ```
 
 ### Uninstall
 
 ```sh
-sudo launchctl unload /Library/LaunchDaemons/rfs.v2.retrospective.plist
+sudo launchctl bootout system/rfs.v2.retrospective
 sudo rm /Library/LaunchDaemons/rfs.v2.retrospective.plist
 ```
 
